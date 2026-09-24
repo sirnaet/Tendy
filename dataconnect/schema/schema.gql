@@ -1,0 +1,40 @@
+# GraphQL Schema for Tendy University Attendance Tracker (Firebase Data Connect)
+
+type User @table {
+  id: String! @primaryKey
+  email: String!
+  maxAbsencePct: Float!
+  updatedAt: String
+}
+
+type Semester @table {
+  id: String! @primaryKey
+  userId: String!
+  name: String!
+  startDate: String!
+  endDate: String!
+  holidays: [String!]!
+  isActive: Boolean!
+}
+
+type Unit @table {
+  unitCode: String! @primaryKey
+  semesterId: String!
+  userId: String!
+  name: String!
+  scheduleSlotsJson: String!
+}
+
+type AttendanceLog @table {
+  logId: String! @primaryKey
+  userId: String!
+  semesterId: String!
+  unitCode: String!
+  unitName: String!
+  date: String!
+  dayOfWeek: Int!
+  startTime: String!
+  endTime: String!
+  durationHours: Float!
+  status: String!
+}
