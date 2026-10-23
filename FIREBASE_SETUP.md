@@ -2,6 +2,16 @@
 
 This application is configured to connect to Google Cloud Firebase / Cloud Firestore for real-time attendance logging and user management.
 
+## Authentication Setup
+
+Enable **Email/Password** in Firebase Console -> **Authentication** -> **Sign-in method**.
+Set `FIREBASE_WEB_API_KEY` to the project's Firebase Web API key and configure Firebase
+Admin credentials using a service account or Application Default Credentials. The app
+authenticates passwords with Firebase Authentication and verifies each returned ID token
+with Firebase Admin before loading a user's Firestore data. Login and signup fail closed
+if Firebase Authentication is not configured; the local MemoryStore does not provide a
+demo or anonymous authentication mode.
+
 ## Current Firebase Project Configuration
 
 - **Project ID**: `tendy-eb67` (configured in `.firebaserc`)

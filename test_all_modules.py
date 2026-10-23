@@ -20,8 +20,7 @@ def test_firebase_client_and_auth():
     db = get_db()
     assert db is not None
 
-    uid = verify_firebase_token("demo_token_test_user_99")
-    assert uid == "test_user_99"
+    uid = "test_user_99"
 
     user_ref = db.collection("users").document(uid)
     user_ref.set({"email": "test@university.edu", "max_absence_pct": 20.0})
@@ -30,6 +29,14 @@ def test_firebase_client_and_auth():
     assert doc.exists
     assert doc.to_dict()["email"] == "test@university.edu"
     print("      ✓ firebase_client tests passed.")
+
+def test_demo_token_is_rejected():
+    for token in ("demo_token_test_user_99", "not-a-firebase-token"):
+        try:
+            verify_firebase_token(token)
+        except ValueError:
+            continue
+        raise AssertionError("Unverified tokens must not authenticate users")
 
 def test_schemas_validation():
     print("[2/3] Testing Pydantic v2 schemas...")
@@ -104,6 +111,7 @@ def test_engine_math_rules():
 if __name__ == "__main__":
     print("\n--- RUNNING SYSTEM-WIDE TEST SUITE FOR UNIVERSITY ATTENDANCE TRACKER ---")
     test_firebase_client_and_auth()
+    test_demo_token_is_rejected()
     test_schemas_validation()
     test_engine_math_rules()
     print("-------------------------------------------------------------------------")

@@ -6,6 +6,10 @@ and Auth ID Token verification helper with local fallback store support.
 """
 
 import os
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 from typing import Dict, Any, List, Optional
@@ -232,27 +236,69 @@ def get_firebase_status() -> Dict[str, Any]:
 
 def verify_firebase_token(id_token: str) -> str:
     """
-    Verifies a Firebase Authentication ID Token and returns the authenticated user's `uid`.
-    Supports fallback token formats for dev / testing environments.
+    Verifies a Firebase Authentication ID token and returns the authenticated user's UID.
     """
     if not id_token:
         raise ValueError("Missing authentication token")
-
-    if id_token.startswith("demo_token_"):
-        return id_token.replace("demo_token_", "")
 
     if not firebase_admin._apps:
         init_firebase()
 
     try:
+        if not firebase_admin._apps:
+            raise ValueError("Firebase Admin is not initialized")
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token.get("uid")
         if not uid:
             raise ValueError("Token missing UID claim")
         return uid
-    except Exception as e:
-        # Fallback for dev mode string tokens
-        if not id_token.startswith("eyJ"):
-            return f"dev_user_{id_token[:8]}"
-        raise ValueError(f"Invalid Firebase ID Token: {e}")
+    except Exception:
+        raise ValueError("Invalid Firebase ID token") from None
 
+
+def authenticate_with_firebase(email: str, password: str, *, sign_up: bool = False) -> tuple[str, str]:
+    """Authenticate with Firebase Identity Toolkit and return the verified UID and email."""
+    api_key = os.environ.get("FIREBASE_WEB_API_KEY")
+    if not api_key:
+        raise RuntimeError("Firebase Authentication is not configured.")
+
+    operation = "signUp" if sign_up else "signInWithPassword"
+    endpoint = (
+        f"https://identitytoolkit.googleapis.com/v1/accounts:{operation}?"
+        f"{urllib.parse.urlencode({'key': api_key})}"
+    )
+    body = json.dumps(
+        {"email": email, "password": password, "returnSecureToken": True}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            error_code = json.loads(error.read()).get("error", {}).get("message", "")
+        except (json.JSONDecodeError, AttributeError):
+            error_code = ""
+        if error_code in {"EMAIL_EXISTS", "EMAIL_NOT_FOUND", "INVALID_PASSWORD", "INVALID_LOGIN_CREDENTIALS"}:
+            raise ValueError("Email or password is incorrect, or the account cannot be created.") from None
+        if error_code == "WEAK_PASSWORD":
+            raise ValueError("Password must be at least 6 characters long.") from None
+        raise RuntimeError("Firebase Authentication request failed.") from None
+    except urllib.error.URLError:
+        raise RuntimeError("Firebase Authentication is temporarily unavailable.") from None
+
+    id_token = result.get("idToken")
+    local_id = result.get("localId")
+    if not id_token or not local_id:
+        raise RuntimeError("Firebase Authentication returned an incomplete response.")
+
+    verified_uid = verify_firebase_token(id_token)
+    if verified_uid != local_id:
+        raise ValueError("Firebase Authentication returned an invalid identity.")
+    return verified_uid, result.get("email", email)

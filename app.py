@@ -19,7 +19,7 @@ from engine import (
     generate_attendance_logs,
     calculate_unit_stats
 )
-from firebase_client import get_db, get_firebase_status, verify_firebase_token
+from firebase_client import authenticate_with_firebase, get_db, get_firebase_status
 
 # --- Bespoke Editorial Theme Palette Tokens ---
 PALETTE = {
@@ -146,13 +146,12 @@ class AppState(rx.State):
     Handles Auth, Firebase Connection, Right-Side Configure Dates, Daily Roster Attendance Actions, and Unit Stats.
     """
     # Authentication & Session State
-    is_logged_in: bool = True
+    _uid: str = ""
+    _user_email: str = ""
     auth_mode: str = "login"  # "login" or "signup"
     email_input: str = ""
     password_input: str = ""
     auth_error_msg: str = ""
-    uid: str = "student_user_01"
-    user_email: str = "student@university.edu"
     max_absence_pct: float = 20.0
     is_dark_mode: bool = False
 
@@ -179,6 +178,14 @@ class AppState(rx.State):
     # Raw Firestore Document Collections
     units_dict: List[Dict[str, Any]] = []
     attendance_logs_dict: List[Dict[str, Any]] = []
+
+    @rx.var
+    def is_logged_in(self) -> bool:
+        return bool(self._uid)
+
+    @rx.var
+    def user_email(self) -> str:
+        return self._user_email
 
     # Daily Roster State & Filter
     unit_stats_list: List[Dict[str, Any]] = []
@@ -272,9 +279,9 @@ class AppState(rx.State):
         self.auth_error_msg = ""
 
     def handle_login(self):
-        """Authenticates student user without seeding fake data."""
+        """Authenticates the student through Firebase Authentication."""
         email = self.email_input.strip()
-        pwd = self.password_input.strip()
+        pwd = self.password_input
 
         if not email or not pwd:
             self.auth_error_msg = "Please enter both Email and Password."
@@ -284,24 +291,12 @@ class AppState(rx.State):
             self.auth_error_msg = "Please enter a valid university email address."
             return
 
-        clean_uid = "user_" + "".join(c for c in email if c.isalnum())
-        self.uid = clean_uid
-        self.user_email = email
-        self.is_logged_in = True
-        self.auth_error_msg = ""
-
-        db = get_db()
-        user_ref = db.collection("users").document(self.uid)
-        user_doc = user_ref.get()
-        if not user_doc.exists:
-            user_ref.set({"email": email, "max_absence_pct": 20.0})
-
-        self._load_from_firestore(db)
+        self._authenticate(email, pwd)
 
     def handle_signup(self):
-        """Registers new student user without seeding fake data."""
+        """Registers the student through Firebase Authentication."""
         email = self.email_input.strip()
-        pwd = self.password_input.strip()
+        pwd = self.password_input
 
         if not email or not pwd:
             self.auth_error_msg = "Please provide an Email and Password to register."
@@ -311,27 +306,50 @@ class AppState(rx.State):
             self.auth_error_msg = "Password must be at least 6 characters long."
             return
 
-        clean_uid = "user_" + "".join(c for c in email if c.isalnum())
-        self.uid = clean_uid
-        self.user_email = email
-        self.is_logged_in = True
-        self.auth_error_msg = ""
+        self._authenticate(email, pwd, sign_up=True)
 
-        db = get_db()
-        user_ref = db.collection("users").document(self.uid)
-        user_ref.set({"email": email, "max_absence_pct": 20.0})
-        self._load_from_firestore(db)
+    def _authenticate(self, email: str, password: str, *, sign_up: bool = False):
+        try:
+            uid, authenticated_email = authenticate_with_firebase(
+                email, password, sign_up=sign_up
+            )
+            db = get_db()
+            user_ref = db.collection("users").document(uid)
+            user_doc = user_ref.get()
+            if not user_doc.exists:
+                user_ref.set({"email": authenticated_email, "max_absence_pct": 20.0})
+
+            self._uid = uid
+            self._user_email = authenticated_email
+            self.password_input = ""
+            self.auth_error_msg = ""
+            self._load_from_firestore(db)
+        except (RuntimeError, ValueError) as error:
+            self._uid = ""
+            self._user_email = ""
+            self.password_input = ""
+            self.auth_error_msg = str(error)
 
     def handle_logout(self):
         """Logs out student."""
-        self.is_logged_in = False
+        self._uid = ""
+        self._user_email = ""
         self.email_input = ""
         self.password_input = ""
         self.auth_error_msg = ""
 
+    def _require_authentication(self) -> bool:
+        if self._uid:
+            return True
+        self.auth_error_msg = "Please sign in to continue."
+        return False
+
     # --- Right-Side Configure Dates Handlers ---
     def save_semester_dates(self):
         """Saves configured semester dates, holiday list, and allowed absence percentage from right panel."""
+        if not self._require_authentication():
+            return
+
         name = self.input_sem_name.strip()
         start = self.input_sem_start.strip()
         end = self.input_sem_end.strip()
@@ -371,8 +389,8 @@ class AppState(rx.State):
         self.semester_holidays = holidays_list
 
         db = get_db()
-        db.collection("users").document(self.uid).set({"email": self.user_email, "max_absence_pct": self.max_absence_pct}, merge=True)
-        sem_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id)
+        db.collection("users").document(self._uid).set({"email": self._user_email, "max_absence_pct": self.max_absence_pct}, merge=True)
+        sem_ref = db.collection("users").document(self._uid).collection("semesters").document(self.active_semester_id)
         sem_ref.set({
             "name": name,
             "start_date": start,
@@ -408,7 +426,7 @@ class AppState(rx.State):
 
             batch = db.batch()
             for log in new_logs:
-                l_ref = db.collection("users").document(self.uid).collection("attendance_logs").document(log.log_id)
+                l_ref = db.collection("users").document(self._uid).collection("attendance_logs").document(log.log_id)
                 batch.set(l_ref, log.model_dump())
             batch.commit()
 
@@ -417,15 +435,15 @@ class AppState(rx.State):
 
     def on_load(self):
         """Initializes dataset if logged in."""
-        if not self.is_logged_in:
+        if not self._uid:
             return
 
         db = get_db()
-        user_ref = db.collection("users").document(self.uid)
+        user_ref = db.collection("users").document(self._uid)
         user_doc = user_ref.get()
 
         if not user_doc.exists:
-            user_ref.set({"email": self.user_email, "max_absence_pct": self.max_absence_pct})
+            user_ref.set({"email": self._user_email, "max_absence_pct": self.max_absence_pct})
 
         self._load_from_firestore(db)
 
@@ -436,14 +454,14 @@ class AppState(rx.State):
         self.firebase_mode = status.get("mode", "MemoryStore")
         self.firebase_project = status.get("project_id", "tendy-eb67")
 
-        user_ref = db.collection("users").document(self.uid)
+        user_ref = db.collection("users").document(self._uid)
         user_doc = user_ref.get()
         if user_doc.exists:
             u_data = user_doc.to_dict()
             if "max_absence_pct" in u_data:
                 self.max_absence_pct = float(u_data["max_absence_pct"])
 
-        sem_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id)
+        sem_ref = db.collection("users").document(self._uid).collection("semesters").document(self.active_semester_id)
         sem_doc = sem_ref.get()
         if sem_doc.exists:
             s_data = sem_doc.to_dict()
@@ -458,11 +476,11 @@ class AppState(rx.State):
         self.input_sem_holidays = ", ".join(self.semester_holidays)
         self.input_max_absence_pct = str(self.max_absence_pct)
 
-        u_stream = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id).collection("units").stream()
+        u_stream = db.collection("users").document(self._uid).collection("semesters").document(self.active_semester_id).collection("units").stream()
         units_raw = [d.to_dict() for d in u_stream]
         self.units_dict = units_raw
 
-        l_stream = db.collection("users").document(self.uid).collection("attendance_logs").where("semester_id", "==", self.active_semester_id).stream()
+        l_stream = db.collection("users").document(self._uid).collection("attendance_logs").where("semester_id", "==", self.active_semester_id).stream()
         logs_raw = [d.to_dict() for d in l_stream]
         self.attendance_logs_dict = logs_raw
 
@@ -557,8 +575,11 @@ class AppState(rx.State):
 
     def set_log_status(self, log_id: str, new_status: str):
         """Updates attendance status for a log ('Present', 'Absent', 'Cancelled') in Firestore & state."""
+        if not self._require_authentication():
+            return
+
         db = get_db()
-        log_ref = db.collection("users").document(self.uid).collection("attendance_logs").document(log_id)
+        log_ref = db.collection("users").document(self._uid).collection("attendance_logs").document(log_id)
 
         # Check if log already exists in attendance_logs_dict
         found = False
@@ -582,8 +603,11 @@ class AppState(rx.State):
 
     def delete_unit(self, unit_code: str):
         """Deletes a course unit from Firestore and local state."""
+        if not self._require_authentication():
+            return
+
         db = get_db()
-        u_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id).collection("units").document(unit_code)
+        u_ref = db.collection("users").document(self._uid).collection("semesters").document(self.active_semester_id).collection("units").document(unit_code)
         u_ref.delete()
         self._load_from_firestore(db)
 
@@ -633,6 +657,9 @@ class AppState(rx.State):
 
     def save_unit(self):
         """Saves course unit to Firestore."""
+        if not self._require_authentication():
+            return
+
         code = self.new_unit_code.strip().upper()
         name = self.new_unit_name.strip()
 
@@ -657,7 +684,7 @@ class AppState(rx.State):
 
         unit_obj = Unit(unit_code=code, name=name, schedule_slots=slots_objs)
 
-        u_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id).collection("units").document(code)
+        u_ref = db.collection("users").document(self._uid).collection("semesters").document(self.active_semester_id).collection("units").document(code)
         u_ref.set(unit_obj.model_dump())
 
         semester_obj = Semester(
@@ -671,7 +698,7 @@ class AppState(rx.State):
 
         batch = db.batch()
         for log in new_logs:
-            l_ref = db.collection("users").document(self.uid).collection("attendance_logs").document(log.log_id)
+            l_ref = db.collection("users").document(self._uid).collection("attendance_logs").document(log.log_id)
             batch.set(l_ref, log.model_dump())
         batch.commit()
 

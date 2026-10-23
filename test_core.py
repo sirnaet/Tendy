@@ -73,8 +73,7 @@ def test_attendance_generation_and_stats():
 
 def test_firebase_memory_client():
     db = get_db()
-    uid = verify_firebase_token("demo_token_user_123")
-    assert uid == "user_123"
+    uid = "test_user_123"
 
     user_ref = db.collection("users").document(uid)
     user_ref.set({"email": "student@uni.edu", "max_absence_pct": 20.0})
@@ -84,8 +83,17 @@ def test_firebase_memory_client():
     assert doc.to_dict()["email"] == "student@uni.edu"
     print("✓ test_firebase_memory_client passed")
 
+def test_demo_token_is_rejected():
+    for token in ("demo_token_user_123", "not-a-firebase-token"):
+        try:
+            verify_firebase_token(token)
+        except ValueError:
+            continue
+        raise AssertionError("Unverified tokens must not authenticate users")
+
 if __name__ == "__main__":
     test_duration_calculation()
     test_attendance_generation_and_stats()
     test_firebase_memory_client()
+    test_demo_token_is_rejected()
     print("ALL CORE TESTS PASSED SUCCESSFULLY!")
