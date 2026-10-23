@@ -1,7 +1,7 @@
 import reflex as rx
 
 config = rx.Config(
-    app_name="frontend",
+    app_name="Tendy",
     plugins=[
         rx.plugins.SitemapPlugin(),
         rx.plugins.TailwindV4Plugin(),

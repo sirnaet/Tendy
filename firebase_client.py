@@ -156,40 +156,79 @@ _memory_store = MemoryStore()
 
 # --- Firebase Initialization & Accessors ---
 
+_firebase_status = {"connected": False, "mode": "MemoryStore", "project_id": "tendy-eb67"}
+
 def init_firebase() -> bool:
     """
-    Initializes Firebase Admin SDK if not already initialized.
-    Returns True if initialized with credentials, False if in fallback mode.
+    Initializes Firebase Admin SDK with project 'tendy-eb67' or custom service account credentials.
+    Returns True if initialized with live Firebase/Firestore, False if in local MemoryStore mode.
     """
+    global _firebase_status
     if firebase_admin._apps:
-        return True
+        return _firebase_status["connected"]
 
-    cred_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH")
+    project_id = os.environ.get("FIREBASE_PROJECT_ID", "tendy-eb67")
+    cred_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not cred_path:
+        # Scan current working directory for key files
+        for fname in ["serviceAccountKey.json", "firebase-key.json", "firebase-credentials.json"]:
+            if os.path.exists(fname):
+                cred_path = fname
+                break
+
     if cred_path and os.path.exists(cred_path):
         try:
             cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred)
+            firebase_admin.initialize_app(cred, {"projectId": project_id})
+            _firebase_status = {"connected": True, "mode": "ServiceAccount", "project_id": project_id}
+            print(f"[FirebaseClient] Connected via Service Account key: {cred_path} (Project: {project_id})")
             return True
         except Exception as e:
-            print(f"[FirebaseClient] Service account initialization error: {e}")
+            print(f"[FirebaseClient] Service account key error: {e}")
 
+    # Check for Firestore Emulator
+    if os.environ.get("FIRESTORE_EMULATOR_HOST"):
+        try:
+            firebase_admin.initialize_app(options={"projectId": project_id})
+            _firebase_status = {"connected": True, "mode": "Emulator", "project_id": project_id}
+            print(f"[FirebaseClient] Connected via Firestore Emulator at {os.environ.get('FIRESTORE_EMULATOR_HOST')}")
+            return True
+        except Exception as e:
+            print(f"[FirebaseClient] Emulator init error: {e}")
+
+    # Try Application Default Credentials
     try:
         cred = credentials.ApplicationDefault()
-        firebase_admin.initialize_app(cred)
+        firebase_admin.initialize_app(cred, {"projectId": project_id})
+        _firebase_status = {"connected": True, "mode": "ApplicationDefault", "project_id": project_id}
+        print(f"[FirebaseClient] Connected via Application Default Credentials (Project: {project_id})")
         return True
     except Exception as e:
-        print(f"[FirebaseClient] Operating in local MemoryStore mode (No Firebase credentials detected).")
-        return False
+        print(f"[FirebaseClient] Application Default Credentials not found ({e}). Falling back to MemoryStore.")
+
+    _firebase_status = {"connected": False, "mode": "MemoryStore", "project_id": project_id}
+    return False
 
 def get_db():
     """
-    Returns Cloud Firestore client or local MemoryStore fallback.
+    Returns Cloud Firestore client if connected, or local MemoryStore fallback.
+    """
+    is_live = init_firebase()
+    if is_live:
+        try:
+            return firestore.client()
+        except Exception as e:
+            print(f"[FirebaseClient] Failed to retrieve firestore client: {e}")
+            return _memory_store
+    return _memory_store
+
+def get_firebase_status() -> Dict[str, Any]:
+    """
+    Returns detailed dictionary of Firebase connection status.
     """
     init_firebase()
-    try:
-        return firestore.client()
-    except Exception:
-        return _memory_store
+    return _firebase_status.copy()
 
 def verify_firebase_token(id_token: str) -> str:
     """
@@ -216,3 +255,4 @@ def verify_firebase_token(id_token: str) -> str:
         if not id_token.startswith("eyJ"):
             return f"dev_user_{id_token[:8]}"
         raise ValueError(f"Invalid Firebase ID Token: {e}")
+

@@ -2,9 +2,10 @@
 app.py
 ------
 Production-ready Reflex application for the University Attendance Tracker.
-Features bespoke Deep Burgundy editorial styling, course code anchor architecture,
-Semester Date & Holiday Setup Modal, interactive Attendance Roster with Date Navigation,
-tactile attendance state actions (Present, Absent, Cancelled), and safe-skips guard.
+Features bespoke Deep Burgundy editorial styling, daily classes attendance card with 
+Present, Absent, and Cancelled state buttons right beside every class, right-side 
+Semester Dates configuration panel, live Firebase Cloud Firestore integration, 
+and safe-skips guard without pre-seeded fake data.
 """
 
 import reflex as rx
@@ -18,7 +19,7 @@ from engine import (
     generate_attendance_logs,
     calculate_unit_stats
 )
-from firebase_client import get_db, verify_firebase_token
+from firebase_client import get_db, get_firebase_status, verify_firebase_token
 
 # --- Bespoke Editorial Theme Palette Tokens ---
 PALETTE = {
@@ -35,6 +36,8 @@ PALETTE = {
     "sage_bg": "#EDF5EF",
     "crimson_text": "#8C1D24",
     "crimson_bg": "#FDF0F0",
+    "amber_text": "#945300",
+    "amber_bg": "#FFF9EE",
     "muted_text_light": "#6E5B63",
     "muted_text_dark": "#A8969D",
     "text_dark": "#2D1B22",
@@ -72,16 +75,16 @@ body {{
 .card-editorial {{
     background: #FFFFFF;
     border: 1px solid {PALETTE["border_light"]};
-    border-radius: 12px;
-    box-shadow: 0 2px 10px rgba(74, 14, 23, 0.04);
+    border-radius: 14px;
+    box-shadow: 0 4px 16px rgba(74, 14, 23, 0.04);
     transition: all 0.2s ease-in-out;
 }}
 
 .card-editorial-dark {{
     background: {PALETTE["card_dark"]};
     border: 1px solid {PALETTE["border_dark"]};
-    border-radius: 12px;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+    border-radius: 14px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
     transition: all 0.2s ease-in-out;
 }}
 
@@ -100,6 +103,27 @@ body {{
     font-family: var(--font-mono);
     font-weight: 600;
 }}
+
+.btn-present {{
+    background-color: #E6F4EA !important;
+    color: #137333 !important;
+    border: 1.5px solid #137333 !important;
+    font-weight: 700 !important;
+}}
+
+.btn-absent {{
+    background-color: #FCE8E6 !important;
+    color: #C5221F !important;
+    border: 1.5px solid #C5221F !important;
+    font-weight: 700 !important;
+}}
+
+.btn-cancelled {{
+    background-color: #FEF7E0 !important;
+    color: #B06000 !important;
+    border: 1.5px solid #B06000 !important;
+    font-weight: 700 !important;
+}}
 """
 
 DAY_NAMES = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
@@ -114,11 +138,12 @@ DAY_LABEL_MAP = {
 }
 DAY_OPTIONS = list(DAY_LABEL_MAP.keys())
 
+
 # --- Application State ---
 class AppState(rx.State):
     """
     Reflex central application state manager.
-    Handles Auth, Semester Setup, Roster Date Navigation, Attendance Actions (Present, Absent, Cancelled), and Unit Stats.
+    Handles Auth, Firebase Connection, Right-Side Configure Dates, Daily Roster Attendance Actions, and Unit Stats.
     """
     # Authentication & Session State
     is_logged_in: bool = True
@@ -126,34 +151,38 @@ class AppState(rx.State):
     email_input: str = ""
     password_input: str = ""
     auth_error_msg: str = ""
-    uid: str = "demo_student_01"
-    user_email: str = "alex.student@university.edu"
+    uid: str = "student_user_01"
+    user_email: str = "student@university.edu"
     max_absence_pct: float = 20.0
     is_dark_mode: bool = False
 
-    # Active Semester & Data
+    # Firebase Connection State
+    firebase_connected: bool = False
+    firebase_mode: str = "MemoryStore"
+    firebase_project: str = "tendy-eb67"
+
+    # Active Semester & Configure Dates Form State
     active_semester_id: str = "sem_fall_2026"
     semester_name: str = "Fall 2026"
     semester_start: str = "2026-09-01"
     semester_end: str = "2026-12-20"
     semester_holidays: List[str] = ["2026-11-26", "2026-11-27"]
-
-    # Semester Setup Modal State
-    is_semester_modal_open: bool = False
+    
     input_sem_name: str = "Fall 2026"
     input_sem_start: str = "2026-09-01"
     input_sem_end: str = "2026-12-20"
     input_sem_holidays: str = "2026-11-26, 2026-11-27"
     input_max_absence_pct: str = "20.0"
     sem_error_msg: str = ""
+    sem_success_msg: str = ""
 
     # Raw Firestore Document Collections
     units_dict: List[Dict[str, Any]] = []
     attendance_logs_dict: List[Dict[str, Any]] = []
 
-    # UI Computed Aggregates & Roster Navigation
+    # Daily Roster State & Filter
     unit_stats_list: List[Dict[str, Any]] = []
-    selected_roster_date: str = datetime.now().strftime("%Y-%m-%d")
+    selected_roster_date: str = date.today().strftime("%Y-%m-%d")
     roster_status_filter: str = "ALL"  # "ALL", "Pending", "Present", "Absent", "Cancelled"
     displayed_roster: List[Dict[str, Any]] = []
 
@@ -243,7 +272,7 @@ class AppState(rx.State):
         self.auth_error_msg = ""
 
     def handle_login(self):
-        """Authenticates student user."""
+        """Authenticates student user without seeding fake data."""
         email = self.email_input.strip()
         pwd = self.password_input.strip()
 
@@ -266,12 +295,11 @@ class AppState(rx.State):
         user_doc = user_ref.get()
         if not user_doc.exists:
             user_ref.set({"email": email, "max_absence_pct": 20.0})
-            self._seed_demo_data(db)
 
         self._load_from_firestore(db)
 
     def handle_signup(self):
-        """Registers new student user."""
+        """Registers new student user without seeding fake data."""
         email = self.email_input.strip()
         pwd = self.password_input.strip()
 
@@ -292,16 +320,7 @@ class AppState(rx.State):
         db = get_db()
         user_ref = db.collection("users").document(self.uid)
         user_ref.set({"email": email, "max_absence_pct": 20.0})
-        self._seed_demo_data(db)
         self._load_from_firestore(db)
-
-    def handle_quick_demo_login(self):
-        """One-click instant login for demonstration."""
-        self.uid = "demo_student_01"
-        self.user_email = "alex.student@university.edu"
-        self.is_logged_in = True
-        self.auth_error_msg = ""
-        self.on_load()
 
     def handle_logout(self):
         """Logs out student."""
@@ -310,24 +329,15 @@ class AppState(rx.State):
         self.password_input = ""
         self.auth_error_msg = ""
 
-    # --- Semester Modal Handlers ---
-    def open_semester_modal(self):
-        self.input_sem_name = self.semester_name
-        self.input_sem_start = self.semester_start
-        self.input_sem_end = self.semester_end
-        self.input_sem_holidays = ", ".join(self.semester_holidays)
-        self.input_max_absence_pct = str(self.max_absence_pct)
-        self.sem_error_msg = ""
-        self.is_semester_modal_open = True
-
-    def close_semester_modal(self):
-        self.is_semester_modal_open = False
-
-    def save_semester(self):
-        """Saves configured semester dates, holiday list, and allowed absence percentage."""
+    # --- Right-Side Configure Dates Handlers ---
+    def save_semester_dates(self):
+        """Saves configured semester dates, holiday list, and allowed absence percentage from right panel."""
         name = self.input_sem_name.strip()
         start = self.input_sem_start.strip()
         end = self.input_sem_end.strip()
+
+        self.sem_error_msg = ""
+        self.sem_success_msg = ""
 
         if not name or not start or not end:
             self.sem_error_msg = "Semester Title, Start Date, and End Date are required."
@@ -371,6 +381,7 @@ class AppState(rx.State):
             "is_active": True
         })
 
+        # Regenerate logs if units exist
         units_objs = []
         for u_dict in self.units_dict:
             slots_data = u_dict.get("schedule_slots", [])
@@ -385,22 +396,23 @@ class AppState(rx.State):
             ]
             units_objs.append(Unit(unit_code=u_dict["unit_code"], name=u_dict["name"], schedule_slots=slots))
 
-        semester_obj = Semester(
-            semester_id=self.active_semester_id,
-            name=name,
-            start_date=start,
-            end_date=end,
-            holidays=holidays_list
-        )
-        new_logs = generate_attendance_logs(semester_obj, units_objs)
+        if units_objs:
+            semester_obj = Semester(
+                semester_id=self.active_semester_id,
+                name=name,
+                start_date=start,
+                end_date=end,
+                holidays=holidays_list
+            )
+            new_logs = generate_attendance_logs(semester_obj, units_objs)
 
-        batch = db.batch()
-        for log in new_logs:
-            l_ref = db.collection("users").document(self.uid).collection("attendance_logs").document(log.log_id)
-            batch.set(l_ref, log.model_dump())
-        batch.commit()
+            batch = db.batch()
+            for log in new_logs:
+                l_ref = db.collection("users").document(self.uid).collection("attendance_logs").document(log.log_id)
+                batch.set(l_ref, log.model_dump())
+            batch.commit()
 
-        self.is_semester_modal_open = False
+        self.sem_success_msg = "Semester configuration updated successfully!"
         self._load_from_firestore(db)
 
     def on_load(self):
@@ -414,94 +426,38 @@ class AppState(rx.State):
 
         if not user_doc.exists:
             user_ref.set({"email": self.user_email, "max_absence_pct": self.max_absence_pct})
-            self._seed_demo_data(db)
 
         self._load_from_firestore(db)
 
-    def _seed_demo_data(self, db):
-        """Seeds demo semester, CS units, and initial class logs."""
-        sem_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id)
-        sem_ref.set({
-            "name": self.semester_name,
-            "start_date": self.semester_start,
-            "end_date": self.semester_end,
-            "holidays": self.semester_holidays,
-            "is_active": True
-        })
-
-        demo_units = [
-            {
-                "unit_code": "CS-302",
-                "name": "Database Systems & Architecture",
-                "schedule_slots": [
-                    {"slot_id": "s1", "day_of_week": 1, "start_time": "09:00", "end_time": "11:00", "duration_hours": 2.0},
-                    {"slot_id": "s2", "day_of_week": 4, "start_time": "14:00", "end_time": "17:00", "duration_hours": 3.0}
-                ]
-            },
-            {
-                "unit_code": "CS-401",
-                "name": "Distributed Operating Systems",
-                "schedule_slots": [
-                    {"slot_id": "s3", "day_of_week": 2, "start_time": "10:00", "end_time": "12:00", "duration_hours": 2.0},
-                    {"slot_id": "s4", "day_of_week": 5, "start_time": "11:00", "end_time": "13:00", "duration_hours": 2.0}
-                ]
-            },
-            {
-                "unit_code": "MATH-210",
-                "name": "Applied Linear Algebra & Statistics",
-                "schedule_slots": [
-                    {"slot_id": "s5", "day_of_week": 3, "start_time": "08:00", "end_time": "10:00", "duration_hours": 2.0}
-                ]
-            }
-        ]
-
-        batch = db.batch()
-        units_objs = []
-        for u in demo_units:
-            u_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id).collection("units").document(u["unit_code"])
-            batch.set(u_ref, u)
-            
-            slots = [
-                ScheduleSlot(
-                    slot_id=str(s["slot_id"]),
-                    day_of_week=int(s["day_of_week"]),
-                    start_time=str(s["start_time"]),
-                    end_time=str(s["end_time"]),
-                    duration_hours=float(s["duration_hours"])
-                ) for s in u["schedule_slots"]
-            ]
-            units_objs.append(Unit(unit_code=u["unit_code"], name=u["name"], schedule_slots=slots))
-
-        batch.commit()
-
-        semester_obj = Semester(
-            semester_id=self.active_semester_id,
-            name=self.semester_name,
-            start_date=self.semester_start,
-            end_date=self.semester_end,
-            holidays=self.semester_holidays
-        )
-        logs = generate_attendance_logs(semester_obj, units_objs)
-
-        log_batch = db.batch()
-        today_date = date.today()
-        for i, log in enumerate(logs):
-            log_dt = datetime.strptime(log.date, "%Y-%m-%d").date()
-            if log_dt < today_date:
-                if i % 7 == 0:
-                    log.status = "Absent"
-                elif i % 11 == 0:
-                    log.status = "Cancelled"
-                else:
-                    log.status = "Present"
-
-            l_ref = db.collection("users").document(self.uid).collection("attendance_logs").document(log.log_id)
-            log_batch.set(l_ref, log.model_dump())
-
-        log_batch.commit()
-
     def _load_from_firestore(self, db):
         """Loads units and logs from Firestore and computes aggregates."""
+        status = get_firebase_status()
+        self.firebase_connected = status.get("connected", False)
+        self.firebase_mode = status.get("mode", "MemoryStore")
+        self.firebase_project = status.get("project_id", "tendy-eb67")
+
+        user_ref = db.collection("users").document(self.uid)
+        user_doc = user_ref.get()
+        if user_doc.exists:
+            u_data = user_doc.to_dict()
+            if "max_absence_pct" in u_data:
+                self.max_absence_pct = float(u_data["max_absence_pct"])
+
+        sem_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id)
+        sem_doc = sem_ref.get()
+        if sem_doc.exists:
+            s_data = sem_doc.to_dict()
+            self.semester_name = s_data.get("name", self.semester_name)
+            self.semester_start = s_data.get("start_date", self.semester_start)
+            self.semester_end = s_data.get("end_date", self.semester_end)
+            self.semester_holidays = s_data.get("holidays", self.semester_holidays)
+
+        self.input_sem_name = self.semester_name
+        self.input_sem_start = self.semester_start
+        self.input_sem_end = self.semester_end
+        self.input_sem_holidays = ", ".join(self.semester_holidays)
+        self.input_max_absence_pct = str(self.max_absence_pct)
+
         u_stream = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id).collection("units").stream()
         units_raw = [d.to_dict() for d in u_stream]
         self.units_dict = units_raw
@@ -543,7 +499,6 @@ class AppState(rx.State):
             stats_list.append(st_dict)
 
         self.unit_stats_list = stats_list
-
         self._filter_displayed_roster()
 
     def _filter_displayed_roster(self):
@@ -625,6 +580,13 @@ class AppState(rx.State):
 
         self._recalculate_all_stats()
 
+    def delete_unit(self, unit_code: str):
+        """Deletes a course unit from Firestore and local state."""
+        db = get_db()
+        u_ref = db.collection("users").document(self.uid).collection("semesters").document(self.active_semester_id).collection("units").document(unit_code)
+        u_ref.delete()
+        self._load_from_firestore(db)
+
     def toggle_theme(self):
         """Toggles dark/light mode."""
         self.is_dark_mode = not self.is_dark_mode
@@ -675,7 +637,7 @@ class AppState(rx.State):
         name = self.new_unit_name.strip()
 
         if not code or not name:
-            self.form_error_msg = "Course Code and Course Name are required."
+            self.form_error_msg = "Course Code and Course Title are required."
             return
 
         if not self.draft_schedule_slots:
@@ -726,7 +688,7 @@ def render_auth_view() -> rx.Component:
     return rx.center(
         rx.vstack(
             rx.vstack(
-                rx.text("TENDY", font_size="2.4rem", font_weight="800", letter_spacing="-0.04em", color=PALETTE["accent_rose"]),
+                rx.text("TENDY", font_size="2.6rem", font_weight="800", letter_spacing="-0.04em", color=PALETTE["accent_rose"]),
                 rx.text("University Attendance & Safe-Skips Guard", font_family="var(--font-heading)", font_size="1.2rem", font_style="italic", color=PALETTE["muted_text_light"]),
                 align_items="center",
                 spacing="1"
@@ -734,13 +696,13 @@ def render_auth_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.heading(
-                        rx.cond(is_login, "WELCOME BACK", "CREATE YOUR ACCOUNT"),
+                        rx.cond(is_login, "STUDENT LOGIN", "CREATE ACCOUNT"),
                         size="3",
                         class_name="editorial-heading",
                         font_weight="700"
                     ),
                     rx.text(
-                        rx.cond(is_login, "Sign in to track your semester attendance and safe skips.", "Register to manage your course schedules and attendance rules."),
+                        rx.cond(is_login, "Sign in to manage your classes and track attendance.", "Register to set up your semester schedules and attendance rules."),
                         font_size="0.85rem",
                         color=PALETTE["muted_text_light"],
                         margin_bottom="16px"
@@ -795,16 +757,6 @@ def render_auth_view() -> rx.Component:
                         spacing="2",
                         margin_top="16px"
                     ),
-                    rx.divider(margin_y="16px"),
-                    rx.button(
-                        "⚡ Instant One-Click Student Demo",
-                        on_click=AppState.handle_quick_demo_login,
-                        variant="soft",
-                        color_scheme="ruby",
-                        width="100%",
-                        font_size="0.85rem",
-                        class_name="mono-code"
-                    ),
                     width="100%",
                     align_items="center"
                 ),
@@ -823,28 +775,31 @@ def render_auth_view() -> rx.Component:
 
 
 def render_navbar() -> rx.Component:
-    """Header banner featuring Editorial branding, active user, semester config button, and sign out."""
+    """Header banner featuring Editorial branding, active user, live Firebase connection indicator, and actions."""
     return rx.box(
         rx.hstack(
             rx.vstack(
                 rx.hstack(
-                    rx.text("TENDY", font_weight="700", font_size="1.5rem", letter_spacing="-0.03em", color=PALETTE["accent_rose"]),
-                    rx.text("|", font_size="1.5rem", color=PALETTE["muted_text_dark"]),
+                    rx.text("TENDY", font_weight="800", font_size="1.6rem", letter_spacing="-0.03em", color=PALETTE["accent_rose"]),
+                    rx.text("|", font_size="1.4rem", color=PALETTE["muted_text_dark"]),
                     rx.text("Attendance & Safe-Skips Guard", font_size="1.1rem", font_style="italic", font_family="var(--font-heading)", color=PALETTE["parchment_light"]),
                     spacing="3",
                     align_items="center"
                 ),
                 rx.hstack(
-                    rx.text("User: " + AppState.user_email, font_size="0.85rem", class_name="mono-code", color=PALETTE["muted_text_dark"]),
+                    rx.text("User: " + AppState.user_email, font_size="0.8rem", class_name="mono-code", color=PALETTE["muted_text_dark"]),
                     rx.text("•", color=PALETTE["muted_text_dark"]),
-                    rx.text("Semester: " + AppState.semester_name, font_size="0.85rem", class_name="mono-code", color=PALETTE["muted_text_dark"]),
-                    rx.button(
-                        "⚙️ Configure Dates",
-                        on_click=AppState.open_semester_modal,
-                        size="1",
-                        variant="soft",
-                        color_scheme="ruby",
-                        class_name="mono-code"
+                    # Live Firebase Status Pill
+                    rx.badge(
+                        rx.cond(
+                            AppState.firebase_connected,
+                            "🟢 Firebase: " + AppState.firebase_project,
+                            "🟡 Local Store (" + AppState.firebase_mode + ")"
+                        ),
+                        variant="solid",
+                        color_scheme=rx.cond(AppState.firebase_connected, "green", "amber"),
+                        class_name="mono-code",
+                        font_size="0.75rem"
                     ),
                     spacing="2",
                     align_items="center"
@@ -862,7 +817,7 @@ def render_navbar() -> rx.Component:
                     font_weight="600",
                     border_radius="8px",
                     padding_x="16px",
-                    padding_y="8px",
+                    padding_y="10px",
                     _hover={"background_color": PALETTE["burgundy_base"]}
                 ),
                 rx.button(
@@ -886,7 +841,7 @@ def render_navbar() -> rx.Component:
             width="100%",
             align_items="center",
             padding_x="32px",
-            padding_y="20px"
+            padding_y="18px"
         ),
         background_color=PALETTE["burgundy_base"],
         border_bottom=f"2px solid {PALETTE['accent_wine']}",
@@ -894,12 +849,13 @@ def render_navbar() -> rx.Component:
     )
 
 
-def render_today_roster_bar() -> rx.Component:
+def render_today_classes_card() -> rx.Component:
     """
-    Interactive Attendance Roster Bar with Date Navigation & Action Buttons:
-    Displays sessions for selected calendar date with direct action buttons [✓ Present], [✗ Absent], [⊘ Cancelled].
+    Card showing the Classes of the Day.
+    Beside every class, distinct action buttons for Attendance Options: [Absent], [Present], [Cancelled].
+    Includes date navigation header bar.
     """
-    def render_roster_item(item: Dict[str, Any]) -> rx.Component:
+    def render_class_row(item: Dict[str, Any]) -> rx.Component:
         item_status = item["status"].to(str)
         log_id = item["log_id"].to(str)
         u_code = item["unit_code"].to(str)
@@ -914,22 +870,25 @@ def render_today_roster_bar() -> rx.Component:
 
         return rx.box(
             rx.hstack(
-                rx.box(
-                    rx.text(u_code, class_name="mono-code", font_weight="700", font_size="1.1rem", color=PALETTE["burgundy_base"]),
-                    rx.text(u_name, font_size="0.9rem", color=PALETTE["muted_text_light"]),
-                    width="240px"
-                ),
-                rx.box(
+                # Class Info (Left)
+                rx.vstack(
                     rx.hstack(
-                        rx.icon(tag="clock", size=16, color=PALETTE["burgundy_base"]),
-                        rx.text(s_time + " - " + e_time + " (" + dur + "h)", class_name="mono-code", font_size="0.9rem", font_weight="600"),
+                        rx.badge(u_code, variant="solid", color_scheme="ruby", class_name="mono-code", font_weight="700", font_size="0.95rem"),
+                        rx.text(u_name, font_weight="600", font_size="0.95rem", color=PALETTE["text_dark"]),
                         spacing="2",
                         align_items="center"
                     ),
-                    width="200px"
+                    rx.hstack(
+                        rx.icon(tag="clock", size=14, color=PALETTE["muted_text_light"]),
+                        rx.text(s_time + " – " + e_time + " (" + dur + " hrs)", class_name="mono-code", font_size="0.8rem", color=PALETTE["muted_text_light"]),
+                        spacing="1",
+                        align_items="center"
+                    ),
+                    align_items="start",
+                    spacing="1"
                 ),
                 rx.spacer(),
-                # Action Buttons: [Present], [Absent], [Cancelled]
+                # Attendance Action Buttons Beside Every Class: [Absent], [Present], [Cancelled]
                 rx.hstack(
                     rx.button(
                         "✓ Present",
@@ -937,7 +896,8 @@ def render_today_roster_bar() -> rx.Component:
                         size="2",
                         variant=rx.cond(is_present, "solid", "outline"),
                         color_scheme=rx.cond(is_present, "green", "gray"),
-                        class_name="mono-code"
+                        class_name=rx.cond(is_present, "btn-present mono-code", "mono-code"),
+                        font_weight="600"
                     ),
                     rx.button(
                         "✗ Absent",
@@ -945,7 +905,8 @@ def render_today_roster_bar() -> rx.Component:
                         size="2",
                         variant=rx.cond(is_absent, "solid", "outline"),
                         color_scheme=rx.cond(is_absent, "red", "gray"),
-                        class_name="mono-code"
+                        class_name=rx.cond(is_absent, "btn-absent mono-code", "mono-code"),
+                        font_weight="600"
                     ),
                     rx.button(
                         "⊘ Cancelled",
@@ -953,31 +914,35 @@ def render_today_roster_bar() -> rx.Component:
                         size="2",
                         variant=rx.cond(is_cancelled, "solid", "outline"),
                         color_scheme=rx.cond(is_cancelled, "orange", "gray"),
-                        class_name="mono-code"
+                        class_name=rx.cond(is_cancelled, "btn-cancelled mono-code", "mono-code"),
+                        font_weight="600"
                     ),
-                    spacing="2"
+                    spacing="2",
+                    align_items="center"
                 ),
                 width="100%",
                 align_items="center",
-                padding="12px 16px"
+                padding="14px 18px"
             ),
             border=f"1px solid {PALETTE['border_light']}",
-            border_radius="8px",
-            margin_bottom="8px",
-            background="#FFFFFF"
+            border_radius="10px",
+            margin_bottom="10px",
+            background="#FFFFFF",
+            box_shadow="0 2px 6px rgba(0,0,0,0.02)"
         )
 
     return rx.box(
         rx.vstack(
-            # Roster Title & Date Controls
+            # Card Header with Date Navigation
             rx.hstack(
                 rx.vstack(
-                    rx.heading("CLASSES OF THE DAY & ATTENDANCE ACTIONS", size="3", class_name="editorial-heading", font_weight="700", letter_spacing="0.05em"),
-                    rx.text("Mark your classes as Present, Absent, or Cancelled to update safe skips buffer in real-time.", font_size="0.85rem", color=PALETTE["muted_text_light"]),
-                    spacing="1"
+                    rx.heading("CLASSES OF THE DAY", size="4", class_name="editorial-heading", font_weight="700"),
+                    rx.text("Record attendance for scheduled classes on " + AppState.selected_roster_date, font_size="0.85rem", color=PALETTE["muted_text_light"]),
+                    spacing="0",
+                    align_items="start"
                 ),
                 rx.spacer(),
-                # Date Navigation Controls
+                # Navigation Toolbar
                 rx.hstack(
                     rx.button("◄ Prev", on_click=AppState.prev_roster_day, size="1", variant="outline"),
                     rx.input(
@@ -985,7 +950,7 @@ def render_today_roster_bar() -> rx.Component:
                         value=AppState.selected_roster_date,
                         on_change=AppState.set_selected_roster_date,
                         class_name="mono-code",
-                        width="140px",
+                        width="135px",
                         size="1"
                     ),
                     rx.button("Today", on_click=AppState.jump_to_today, size="1", variant="soft", color_scheme="ruby"),
@@ -999,7 +964,7 @@ def render_today_roster_bar() -> rx.Component:
             rx.divider(margin_y="12px"),
             # Status Filter Tabs
             rx.hstack(
-                rx.text("Filter Status:", font_size="0.8rem", font_weight="600", class_name="mono-code"),
+                rx.text("Filter Status:", font_size="0.75rem", font_weight="700", class_name="mono-code", color=PALETTE["muted_text_light"]),
                 rx.button(
                     "ALL",
                     on_click=lambda: AppState.set_roster_status_filter("ALL"),
@@ -1037,61 +1002,211 @@ def render_today_roster_bar() -> rx.Component:
                 margin_bottom="12px",
                 align_items="center"
             ),
-            # Roster Session Items
+            # Daily Class Items
             rx.cond(
                 AppState.displayed_roster.length() > 0,
                 rx.vstack(
                     rx.foreach(
                         AppState.displayed_roster,
-                        render_roster_item
+                        render_class_row
                     ),
                     width="100%"
                 ),
                 rx.box(
-                    rx.text("No classes scheduled for " + AppState.selected_roster_date + ". Use the date arrows above to select another class day.", font_style="italic", color=PALETTE["muted_text_light"]),
-                    padding="16px"
+                    rx.vstack(
+                        rx.icon(tag="calendar", size=32, color=PALETTE["accent_wine"]),
+                        rx.text("No classes scheduled for " + AppState.selected_roster_date, font_weight="600"),
+                        rx.text("Use the date controls above to check another day, or click '+ Add Course Unit' to create class slots.", font_size="0.85rem", color=PALETTE["muted_text_light"]),
+                        align_items="center",
+                        spacing="2",
+                        padding_y="24px"
+                    ),
+                    width="100%",
+                    border=f"1px dashed {PALETTE['border_light']}",
+                    border_radius="10px",
+                    padding="20px",
+                    text_align="center"
                 )
             ),
             width="100%"
         ),
         padding="24px",
         class_name=rx.cond(AppState.is_dark_mode, "card-editorial-dark", "card-editorial"),
-        margin_bottom="32px",
+        width="100%"
+    )
+
+
+def render_configure_dates_card() -> rx.Component:
+    """
+    Good-looking Configure Dates panel located on the RIGHT SIDE of the layout.
+    Allows configuring semester bounds, holiday dates, and allowed absence %.
+    """
+    return rx.box(
+        rx.vstack(
+            # Header
+            rx.hstack(
+                rx.icon(tag="settings", size=20, color=PALETTE["accent_rose"]),
+                rx.vstack(
+                    rx.heading("CONFIGURE DATES & RULES", size="3", class_name="editorial-heading", font_weight="700"),
+                    rx.text("Semester date bounds & absence threshold", font_size="0.8rem", color=PALETTE["muted_text_light"]),
+                    spacing="0"
+                ),
+                spacing="2",
+                align_items="center"
+            ),
+            rx.divider(margin_y="12px"),
+            
+            # Feedback Notifications
+            rx.cond(
+                AppState.sem_error_msg != "",
+                rx.callout(AppState.sem_error_msg, color_scheme="red", icon="triangle_alert", margin_bottom="8px")
+            ),
+            rx.cond(
+                AppState.sem_success_msg != "",
+                rx.callout(AppState.sem_success_msg, color_scheme="green", icon="check", margin_bottom="8px")
+            ),
+
+            # Form Inputs
+            rx.vstack(
+                rx.vstack(
+                    rx.text("SEMESTER TITLE", font_size="0.75rem", class_name="mono-code", font_weight="700"),
+                    rx.input(
+                        placeholder="e.g. Fall 2026",
+                        value=AppState.input_sem_name,
+                        on_change=AppState.set_input_sem_name,
+                        width="100%"
+                    ),
+                    width="100%",
+                    align_items="start"
+                ),
+                rx.hstack(
+                    rx.vstack(
+                        rx.text("START DATE", font_size="0.75rem", class_name="mono-code", font_weight="700"),
+                        rx.input(
+                            type="date",
+                            value=AppState.input_sem_start,
+                            on_change=AppState.set_input_sem_start,
+                            width="100%",
+                            class_name="mono-code"
+                        ),
+                        width="48%"
+                    ),
+                    rx.vstack(
+                        rx.text("END DATE", font_size="0.75rem", class_name="mono-code", font_weight="700"),
+                        rx.input(
+                            type="date",
+                            value=AppState.input_sem_end,
+                            on_change=AppState.set_input_sem_end,
+                            width="100%",
+                            class_name="mono-code"
+                        ),
+                        width="48%"
+                    ),
+                    width="100%",
+                    justify="between"
+                ),
+                rx.vstack(
+                    rx.text("HOLIDAYS (COMMA SEPARATED YYYY-MM-DD)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
+                    rx.input(
+                        placeholder="2026-11-26, 2026-11-27",
+                        value=AppState.input_sem_holidays,
+                        on_change=AppState.set_input_sem_holidays,
+                        width="100%",
+                        class_name="mono-code"
+                    ),
+                    rx.text("Classes scheduled on holidays are automatically skipped.", font_size="0.75rem", color=PALETTE["muted_text_light"]),
+                    width="100%",
+                    align_items="start"
+                ),
+                rx.vstack(
+                    rx.text("MAX ALLOWED ABSENCE (%)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
+                    rx.input(
+                        type="number",
+                        placeholder="20.0",
+                        value=AppState.input_max_absence_pct,
+                        on_change=AppState.set_input_max_absence_pct,
+                        width="100%",
+                        class_name="mono-code"
+                    ),
+                    rx.text("Threshold before course triggers CRITICAL status.", font_size="0.75rem", color=PALETTE["muted_text_light"]),
+                    width="100%",
+                    align_items="start"
+                ),
+                rx.button(
+                    "💾 Save Semester & Recalculate",
+                    on_click=AppState.save_semester_dates,
+                    background_color=PALETTE["burgundy_base"],
+                    color="#FFFFFF",
+                    font_weight="600",
+                    width="100%",
+                    margin_top="8px",
+                    padding_y="18px",
+                    _hover={"background_color": PALETTE["accent_wine"]}
+                ),
+                spacing="3",
+                width="100%"
+            ),
+
+            rx.divider(margin_y="16px"),
+
+            # Info Box
+            rx.box(
+                rx.vstack(
+                    rx.text("ℹ️ SAFE SKIPS GUARD RULES", font_size="0.75rem", class_name="mono-code", font_weight="700", color=PALETTE["accent_wine"]),
+                    rx.text("Safe skips remaining are automatically computed as: floor((Max Absence % × Effective Hours - Missed Hours) / Avg Slot Duration).", font_size="0.8rem", color=PALETTE["muted_text_light"]),
+                    align_items="start",
+                    spacing="1"
+                ),
+                background=PALETTE["parchment_light"],
+                border=f"1px solid {PALETTE['border_light']}",
+                border_radius="8px",
+                padding="12px",
+                width="100%"
+            ),
+            width="100%"
+        ),
+        padding="24px",
+        class_name=rx.cond(AppState.is_dark_mode, "card-editorial-dark", "card-editorial"),
         width="100%"
     )
 
 
 def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
-    """
-    Course Dashboard Card:
-    - Primary Anchor: Monospaced uppercase `unit_code` (e.g. CS-302).
-    - Weekly slot summary tags.
-    - Dual-segment burgundy/crimson horizontal attendance track.
-    - 3-metric bottom row (Attended Hours, Absence Rate %, Safe Skips Left).
-    - Semantic status badge (IN GOOD STANDING vs CRITICAL).
-    """
+    """Course Dashboard Card with statistics, slot tags, attendance track, and safe skips."""
     is_critical = unit_stat["status_flag"].to(str) == "CRITICAL"
     safe_skips = unit_stat["safe_skips_remaining"].to(int)
     att_hrs = unit_stat["attended_hours"].to(str)
     eff_hrs = unit_stat["effective_total_hours"].to(str)
     abs_pct = unit_stat["absence_rate_pct"].to(str)
+    u_code = unit_stat["unit_code"].to(str)
 
     return rx.box(
         rx.vstack(
             # Header Row
             rx.hstack(
                 rx.vstack(
-                    rx.text(unit_stat["unit_code"].to(str), class_name="mono-code", font_size="1.4rem", font_weight="800", color=PALETTE["burgundy_base"]),
+                    rx.text(u_code, class_name="mono-code", font_size="1.4rem", font_weight="800", color=PALETTE["burgundy_base"]),
                     rx.text(unit_stat["unit_name"].to(str), font_size="1.0rem", font_weight="600", color=PALETTE["text_dark"]),
-                    spacing="1",
+                    spacing="0",
                     align_items="start"
                 ),
                 rx.spacer(),
-                rx.badge(
-                    rx.cond(is_critical, "⚠️ CRITICAL", "✓ IN GOOD STANDING"),
-                    class_name=rx.cond(is_critical, "badge-crimson", "badge-sage"),
-                    padding="6px 12px",
-                    font_size="0.85rem"
+                rx.hstack(
+                    rx.badge(
+                        rx.cond(is_critical, "⚠️ CRITICAL", "✓ IN GOOD STANDING"),
+                        class_name=rx.cond(is_critical, "badge-crimson", "badge-sage"),
+                        padding="6px 12px",
+                        font_size="0.85rem"
+                    ),
+                    rx.button(
+                        "✕",
+                        on_click=lambda: AppState.delete_unit(u_code),
+                        size="1",
+                        variant="ghost",
+                        color_scheme="red"
+                    ),
+                    spacing="2",
+                    align_items="center"
                 ),
                 width="100%",
                 align_items="start"
@@ -1103,13 +1218,12 @@ def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
                     lambda tag: rx.badge(tag, variant="soft", color_scheme="purple", class_name="mono-code", font_size="0.75rem")
                 ),
                 spacing="2",
-                margin_y="12px",
+                margin_y="10px",
                 flex_wrap="wrap"
             ),
-            # Dual-Segment Attendance Track (Progress Visualizer)
+            # Dual-Segment Progress Bar
             rx.box(
                 rx.hstack(
-                    # Attended segment
                     rx.box(
                         height="100%",
                         width=unit_stat["attendance_rate_pct"].to(str) + "%",
@@ -1117,7 +1231,6 @@ def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
                         border_radius="4px 0 0 4px",
                         transition="width 0.4s ease"
                     ),
-                    # Missed segment
                     rx.box(
                         height="100%",
                         width=unit_stat["absence_rate_pct"].to(str) + "%",
@@ -1132,11 +1245,10 @@ def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
                     overflow="hidden"
                 ),
                 width="100%",
-                margin_y="12px"
+                margin_y="10px"
             ),
-            # 3-Metric Bottom Row
+            # Metrics Row
             rx.hstack(
-                # Metric 1: Total Attended
                 rx.vstack(
                     rx.text("ATTENDED / EFF", font_size="0.7rem", class_name="mono-code", color=PALETTE["muted_text_light"]),
                     rx.text(att_hrs + "h / " + eff_hrs + "h", class_name="mono-code", font_size="1.1rem", font_weight="700"),
@@ -1144,7 +1256,6 @@ def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
                     spacing="0"
                 ),
                 rx.spacer(),
-                # Metric 2: Absence Rate %
                 rx.vstack(
                     rx.text("ABSENCE RATE", font_size="0.7rem", class_name="mono-code", color=PALETTE["muted_text_light"]),
                     rx.text(abs_pct + "%", class_name="mono-code", font_size="1.1rem", font_weight="700", color=rx.cond(is_critical, PALETTE["crimson_text"], PALETTE["sage_text"])),
@@ -1152,7 +1263,6 @@ def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
                     spacing="0"
                 ),
                 rx.spacer(),
-                # Metric 3: Safe Skips Left Badge
                 rx.vstack(
                     rx.text("SAFE SKIPS LEFT", font_size="0.7rem", class_name="mono-code", color=PALETTE["muted_text_light"]),
                     rx.badge(
@@ -1160,116 +1270,21 @@ def render_course_card(unit_stat: Dict[str, Any]) -> rx.Component:
                         variant="solid",
                         color_scheme=rx.cond(safe_skips > 0, "green", "red"),
                         class_name="mono-code",
-                        font_size="0.95rem"
+                        font_size="0.9rem"
                     ),
                     align_items="start",
                     spacing="0"
                 ),
                 width="100%",
                 align_items="center",
-                padding_top="8px"
+                padding_top="6px"
             ),
             width="100%"
         ),
-        padding="24px",
+        padding="20px",
         class_name=rx.cond(AppState.is_dark_mode, "card-editorial-dark", "card-editorial"),
-        width="100%"
-    )
-
-
-def render_semester_modal() -> rx.Component:
-    """Semester Setup Modal allowing students to fill start/end dates, holiday list, and allowed absence %."""
-    return rx.dialog.root(
-        rx.dialog.content(
-            rx.dialog.title("CONFIGURE SEMESTER DATES & RULES", class_name="editorial-heading", font_weight="700"),
-            rx.dialog.description("Define your academic semester date bounds, holidays, and allowed absence threshold."),
-            rx.divider(margin_y="12px"),
-            rx.vstack(
-                rx.cond(
-                    AppState.sem_error_msg != "",
-                    rx.callout(AppState.sem_error_msg, color_scheme="red", icon="triangle_alert", margin_bottom="8px")
-                ),
-                rx.vstack(
-                    rx.text("SEMESTER TITLE", font_size="0.75rem", class_name="mono-code", font_weight="700"),
-                    rx.input(
-                        placeholder="e.g. Fall 2026",
-                        value=AppState.input_sem_name,
-                        on_change=AppState.set_input_sem_name,
-                        width="100%"
-                    ),
-                    width="100%",
-                    align_items="start"
-                ),
-                rx.hstack(
-                    rx.vstack(
-                        rx.text("START DATE (YYYY-MM-DD)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
-                        rx.input(
-                            type="date",
-                            value=AppState.input_sem_start,
-                            on_change=AppState.set_input_sem_start,
-                            width="100%",
-                            class_name="mono-code"
-                        ),
-                        width="48%"
-                    ),
-                    rx.vstack(
-                        rx.text("END DATE (YYYY-MM-DD)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
-                        rx.input(
-                            type="date",
-                            value=AppState.input_sem_end,
-                            on_change=AppState.set_input_sem_end,
-                            width="100%",
-                            class_name="mono-code"
-                        ),
-                        width="48%"
-                    ),
-                    width="100%",
-                    justify="between"
-                ),
-                rx.vstack(
-                    rx.text("HOLIDAY DATES (COMMA SEPARATED YYYY-MM-DD)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
-                    rx.input(
-                        placeholder="2026-11-26, 2026-11-27",
-                        value=AppState.input_sem_holidays,
-                        on_change=AppState.set_input_sem_holidays,
-                        width="100%",
-                        class_name="mono-code"
-                    ),
-                    rx.text("Classes will automatically be skipped on holiday dates.", font_size="0.75rem", color=PALETTE["muted_text_light"]),
-                    width="100%",
-                    align_items="start"
-                ),
-                rx.vstack(
-                    rx.text("MAX ALLOWED ABSENCE RATE (%)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
-                    rx.input(
-                        type="number",
-                        placeholder="20.0",
-                        value=AppState.input_max_absence_pct,
-                        on_change=AppState.set_input_max_absence_pct,
-                        width="100%",
-                        class_name="mono-code"
-                    ),
-                    rx.text("Courses exceeding this threshold will be flagged as CRITICAL.", font_size="0.75rem", color=PALETTE["muted_text_light"]),
-                    width="100%",
-                    align_items="start"
-                ),
-                spacing="3",
-                width="100%",
-                padding_y="12px"
-            ),
-            rx.hstack(
-                rx.dialog.close(
-                    rx.button("Cancel", variant="outline", on_click=AppState.close_semester_modal)
-                ),
-                rx.button("Save & Generate Schedule Logs", on_click=AppState.save_semester, background_color=PALETTE["burgundy_base"], color="#FFFFFF"),
-                justify="end",
-                spacing="3",
-                margin_top="16px"
-            ),
-            max_width="520px",
-            padding="24px"
-        ),
-        open=AppState.is_semester_modal_open
+        width="100%",
+        margin_bottom="12px"
     )
 
 
@@ -1294,7 +1309,7 @@ def render_unit_modal() -> rx.Component:
     return rx.dialog.root(
         rx.dialog.content(
             rx.dialog.title("ADD COURSE UNIT & TIMETABLE SLOTS", class_name="editorial-heading", font_weight="700"),
-            rx.dialog.description("Course Code (e.g. CS-302) serves as the primary anchor for all multi-slot attendance stats."),
+            rx.dialog.description("Enter course code, title, and recurring weekly schedule time slots."),
             rx.divider(margin_y="12px"),
             rx.vstack(
                 rx.cond(
@@ -1303,7 +1318,7 @@ def render_unit_modal() -> rx.Component:
                 ),
                 rx.hstack(
                     rx.vstack(
-                        rx.text("COURSE CODE (PRIMARY ANCHOR)", font_size="0.75rem", class_name="mono-code", font_weight="700"),
+                        rx.text("COURSE CODE", font_size="0.75rem", class_name="mono-code", font_weight="700"),
                         rx.input(
                             placeholder="e.g. CS-302",
                             value=AppState.new_unit_code,
@@ -1325,7 +1340,6 @@ def render_unit_modal() -> rx.Component:
                     justify="between"
                 ),
                 rx.heading("RECURRING WEEKLY TIME SLOTS", size="2", margin_top="16px", class_name="mono-code"),
-                # Human-readable Day Select dropdown
                 rx.hstack(
                     rx.select(
                         DAY_OPTIONS,
@@ -1341,7 +1355,6 @@ def render_unit_modal() -> rx.Component:
                     spacing="2",
                     width="100%"
                 ),
-                # Added draft slots list
                 rx.box(
                     rx.vstack(
                         rx.foreach(
@@ -1379,40 +1392,83 @@ def render_unit_modal() -> rx.Component:
 
 
 def index() -> rx.Component:
-    """Main application view with conditional Login/Signup or Dashboard."""
+    """Main application view with conditional Login/Signup or 2-Column Dashboard."""
     return rx.box(
         rx.html(f"<style>{EDITORIAL_CSS}</style>"),
         rx.cond(
             AppState.is_logged_in,
             rx.box(
                 render_navbar(),
-                rx.container(
-                    render_today_roster_bar(),
-                    rx.hstack(
-                        rx.heading("COURSE DASHBOARD UNITS", size="4", class_name="editorial-heading", font_weight="700"),
-                        rx.spacer(),
-                        rx.text("Allowed Absence Threshold: " + AppState.max_absence_pct.to(str) + "%", class_name="mono-code", font_size="0.85rem", color=PALETTE["muted_text_light"]),
-                        width="100%",
-                        align_items="center",
-                        margin_bottom="16px"
-                    ),
-                    rx.cond(
-                        AppState.unit_stats_list.length() > 0,
+                rx.box(
+                    # Responsive 2-Column Grid / HStack Layout
+                    rx.flex(
+                        # Left Main Column: Classes of the Day + Course Units
                         rx.vstack(
-                            rx.foreach(
-                                AppState.unit_stats_list,
-                                render_course_card
+                            render_today_classes_card(),
+                            
+                            # Course Units Header
+                            rx.hstack(
+                                rx.heading("COURSE DASHBOARD & UNITS", size="4", class_name="editorial-heading", font_weight="700"),
+                                rx.spacer(),
+                                rx.button(
+                                    "+ Add Course Unit",
+                                    on_click=AppState.open_unit_modal,
+                                    size="1",
+                                    variant="soft",
+                                    color_scheme="ruby"
+                                ),
+                                width="100%",
+                                align_items="center",
+                                margin_top="16px",
+                                margin_bottom="8px"
                             ),
+                            # Course Cards List
+                            rx.cond(
+                                AppState.unit_stats_list.length() > 0,
+                                rx.vstack(
+                                    rx.foreach(
+                                        AppState.unit_stats_list,
+                                        render_course_card
+                                    ),
+                                    spacing="3",
+                                    width="100%"
+                                ),
+                                rx.box(
+                                    rx.vstack(
+                                        rx.text("No courses configured yet.", font_weight="600"),
+                                        rx.text("Click '+ Add Course Unit' above to add your semester courses and weekly timetables.", font_size="0.85rem", color=PALETTE["muted_text_light"]),
+                                        align_items="center",
+                                        spacing="1"
+                                    ),
+                                    border=f"1px dashed {PALETTE['border_light']}",
+                                    border_radius="10px",
+                                    padding="24px",
+                                    width="100%",
+                                    text_align="center"
+                                )
+                            ),
+                            width="100%",
                             spacing="4",
-                            width="100%"
+                            flex="1",
+                            min_width="320px"
                         ),
-                        rx.text("No courses added yet. Click '+ Add Course Unit' above to get started.", font_style="italic")
+                        # Right Column: Configure Dates Panel
+                        rx.box(
+                            render_configure_dates_card(),
+                            width=rx.breakpoints({"base": "100%", "lg": "380px"}),
+                            min_width="320px"
+                        ),
+                        gap="6",
+                        direction=rx.breakpoints({"base": "column", "lg": "row"}),
+                        align="start",
+                        width="100%"
                     ),
-                    render_semester_modal(),
-                    render_unit_modal(),
-                    max_width="1080px",
-                    padding_y="32px"
-                )
+                    max_width="1280px",
+                    margin="0 auto",
+                    padding_x="24px",
+                    padding_y="28px"
+                ),
+                render_unit_modal()
             ),
             render_auth_view()
         ),
